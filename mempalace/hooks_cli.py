@@ -17,11 +17,24 @@ from pathlib import Path
 SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
+# El checkpoint ya NO pide `mempalace_kg_add`. Retirado el 2026-07-10.
+#
+# Por qué: `mempalace_kg_add` acepta el predicado como texto libre
+# (`mcp_server.py`, input_schema {"type": "string"}, sin enum ni validación).
+# Pedirlo en cada cierre hizo que el modelo inventara un verbo nuevo cada vez.
+# Medido: 4.983 triples en 3.673 tipos de relación distintos — 0.74 predicados
+# por arista. `kg_query` por predicado casi nunca acierta el string exacto, así
+# que el grafo dejó de ser consultable.
+#
+# El recall real ya lo dan `mempalace_search`, `grep` y el MEMORY.md curado.
+# Cajones y diario se conservan: funcionan y se usan. Se retira la PRETENSIÓN
+# de grafo, no la memoria. Los 4.983 triples quedan congelados como legado.
+# Reactivarlo exigiría primero cerrar el vocabulario con un `enum`.
+
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n"
     "1. mempalace_diary_write — AAAK-compressed session summary\n"
     "2. mempalace_add_drawer — verbatim quotes, decisions, code snippets\n"
-    "3. mempalace_kg_add — entity relationships (optional)\n"
     "Do NOT write to Claude Code's native auto-memory (.md files). "
     "Continue conversation after saving."
 )
@@ -30,7 +43,6 @@ PRECOMPACT_BLOCK_REASON = (
     "COMPACTION IMMINENT (MemPalace). Save ALL session content before context is lost:\n"
     "1. mempalace_diary_write — thorough AAAK-compressed session summary\n"
     "2. mempalace_add_drawer — ALL verbatim quotes, decisions, code, context\n"
-    "3. mempalace_kg_add — entity relationships (optional)\n"
     "Be thorough \u2014 after compaction, detailed context will be lost. "
     "Do NOT write to Claude Code's native auto-memory (.md files). "
     "Save everything to MemPalace, then allow compaction to proceed."
