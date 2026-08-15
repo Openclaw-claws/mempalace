@@ -440,7 +440,7 @@ class ChromaBackend(BaseBackend):
         except OSError:
             return (0, 0.0)
 
-    def _client(self, palace_path: str):
+    def _client(self, palace_path: str, *, write_lock_held: bool = False):
         """Return a cached ``PersistentClient``, rebuilding on inode/mtime change.
 
         Handles the palace-rebuild case (repair/nuke/purge) by invalidating the
@@ -489,9 +489,20 @@ class ChromaBackend(BaseBackend):
             # older than chroma.sqlite3 (crashed-mid-write state) BEFORE
             # opening the client — otherwise the Rust graph-walk can
             # segfault on the dangling index. ChromaDB rebuilds lazily.
-            quarantine_stale_hnsw(palace_path)
-            _fix_blob_seq_ids(palace_path)
-            cached = chromadb.PersistentClient(path=palace_path)
+            def open_client():
+                quarantine_stale_hnsw(palace_path)
+                _fix_blob_seq_ids(palace_path)
+                return chromadb.PersistentClient(path=palace_path)
+
+            # Opening can quarantine/repair on-disk state. It must serialize
+            # with writers or a reader could rename an HNSW segment while a
+            # writer still has it open. Create/delete paths already hold the
+            # lock and opt out of reacquiring this non-reentrant file lock.
+            if write_lock_held:
+                cached = open_client()
+            else:
+                with palace_write_lock(palace_path):
+                    cached = open_client()
             self._clients[palace_path] = cached
             # Re-stat after the client constructor runs: chromadb creates
             # chroma.sqlite3 lazily, so the stat captured before the call
@@ -511,9 +522,10 @@ class ChromaBackend(BaseBackend):
         own client cache. New code should obtain a collection through
         :meth:`get_collection` which manages caching internally.
         """
-        quarantine_stale_hnsw(palace_path)
-        _fix_blob_seq_ids(palace_path)
-        return chromadb.PersistentClient(path=palace_path)
+        with palace_write_lock(palace_path):
+            quarantine_stale_hnsw(palace_path)
+            _fix_blob_seq_ids(palace_path)
+            return chromadb.PersistentClient(path=palace_path)
 
     @staticmethod
     def backend_version() -> str:
@@ -564,7 +576,7 @@ class ChromaBackend(BaseBackend):
             # so the create path takes the write lock around client init
             # AND get_or_create_collection.
             with palace_write_lock(palace_path):
-                client = self._client(palace_path)
+                client = self._client(palace_path, write_lock_held=True)
                 collection = client.get_or_create_collection(
                     collection_name, metadata={"hnsw:space": hnsw_space}
                 )
@@ -606,14 +618,14 @@ class ChromaBackend(BaseBackend):
     def delete_collection(self, palace_path: str, collection_name: str) -> None:
         """Delete ``collection_name`` from the palace at ``palace_path``."""
         with palace_write_lock(palace_path):
-            self._client(palace_path).delete_collection(collection_name)
+            self._client(palace_path, write_lock_held=True).delete_collection(collection_name)
 
     def create_collection(
         self, palace_path: str, collection_name: str, hnsw_space: str = "cosine"
     ) -> ChromaCollection:
         """Create (not get-or-create) ``collection_name`` with the given HNSW space."""
         with palace_write_lock(palace_path):
-            collection = self._client(palace_path).create_collection(
+            collection = self._client(palace_path, write_lock_held=True).create_collection(
                 collection_name, metadata={"hnsw:space": hnsw_space}
             )
         return ChromaCollection(collection, palace_path=palace_path)

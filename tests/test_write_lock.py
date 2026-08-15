@@ -84,8 +84,10 @@ def test_timeout_raises_loudly_never_yields_unlocked(tmp_path):
     holder = _spawn(_HOLD_SCRIPT, str(palace), "3")
     try:
         assert holder.stdout.readline().strip() == "held"
-        with pytest.raises(WriteLockTimeoutError), palace_write_lock(str(palace), timeout=0.2):
-            pytest.fail("context body must never run when the lock is held")
+        with pytest.raises(WriteLockTimeoutError) as exc_info:
+            with palace_write_lock(str(palace), timeout=0.2):
+                pytest.fail("context body must never run when the lock is held")
+        assert f"pid={holder.pid}" in str(exc_info.value)
     finally:
         holder.wait(timeout=10)
 
@@ -188,6 +190,29 @@ def test_client_init_quarantines_stale_hnsw_segment(tmp_path):
         chromadb.instance.SharedSystemClient._identifier_to_system = {}
     except AttributeError:
         pass
+
+
+def test_cold_reader_waits_for_active_writer_lock(tmp_path, monkeypatch):
+    """Client startup/repair must not race a writer holding the palace lock."""
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    holder = _spawn(_HOLD_SCRIPT, str(palace), "0.5")
+
+    class _FakeClient:
+        def get_collection(self, _name):
+            return _RecordingCollection()
+
+    monkeypatch.setattr(
+        "mempalace.backends.chroma.chromadb.PersistentClient",
+        lambda *, path: _FakeClient(),
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        start = time.monotonic()
+        ChromaBackend().get_collection(str(palace), "existing")
+        assert time.monotonic() - start >= 0.35
+    finally:
+        holder.wait(timeout=10)
 
 
 def test_writes_from_two_processes_serialize(tmp_path):

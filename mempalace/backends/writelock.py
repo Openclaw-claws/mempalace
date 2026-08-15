@@ -104,7 +104,11 @@ def palace_write_lock(palace_path: str, timeout: float | None = None):
     lock_path = os.path.join(palace_path, _LOCK_FILENAME)
     effective_timeout = _resolve_timeout(timeout)
 
-    lf = open(lock_path, "w")
+    # ``w`` would truncate the current holder's diagnostics before this
+    # process owns the lock. Keep the existing contents while waiting and
+    # replace them only after acquisition.
+    lf = open(lock_path, "a+")
+    lf.seek(0)
     waited = 0.0
     acquired = _try_acquire(lf)
     while not acquired and waited < effective_timeout:
