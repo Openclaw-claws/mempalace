@@ -217,15 +217,22 @@ def _get_collection(create=False):
     try:
         client = _get_client()
         if create:
-            _collection_cache = ChromaCollection(
-                client.get_or_create_collection(
-                    _config.collection_name, metadata={"hnsw:space": "cosine"}
+            from .backends.writelock import palace_write_lock
+
+            with palace_write_lock(_config.palace_path):
+                _collection_cache = ChromaCollection(
+                    client.get_or_create_collection(
+                        _config.collection_name, metadata={"hnsw:space": "cosine"}
+                    ),
+                    palace_path=_config.palace_path,
                 )
-            )
             _metadata_cache = None
             _metadata_cache_time = 0
         elif _collection_cache is None:
-            _collection_cache = ChromaCollection(client.get_collection(_config.collection_name))
+            _collection_cache = ChromaCollection(
+                client.get_collection(_config.collection_name),
+                palace_path=_config.palace_path,
+            )
             _metadata_cache = None
             _metadata_cache_time = 0
         return _collection_cache

@@ -1,5 +1,6 @@
 """ChromaDB-backed MemPalace storage backend (RFC 001 reference implementation)."""
 
+import contextlib
 import datetime as _dt
 import logging
 import os
@@ -19,6 +20,7 @@ from .base import (
     UnsupportedFilterError,
     _IncludeSpec,
 )
+from .writelock import palace_write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +122,7 @@ def quarantine_stale_hnsw(palace_path: str, stale_seconds: float = 3600.0) -> li
             os.rename(seg_dir, target)
             moved.append(target)
             logger.warning(
-                "Quarantined stale HNSW segment %s "
-                "(sqlite %.0fs newer than HNSW); renamed to %s",
+                "Quarantined stale HNSW segment %s (sqlite %.0fs newer than HNSW); renamed to %s",
                 seg_dir,
                 sqlite_mtime - hnsw_mtime,
                 target,
@@ -178,10 +179,25 @@ def _as_list(v: Any) -> list:
 
 
 class ChromaCollection(BaseCollection):
-    """Thin adapter translating ChromaDB dict returns into typed results."""
+    """Thin adapter translating ChromaDB dict returns into typed results.
 
-    def __init__(self, collection):
+    When constructed with ``palace_path``, every mutation (add/upsert/
+    update/delete) is serialized across processes via an OS-level file lock
+    (see :mod:`mempalace.backends.writelock`). ChromaDB's PersistentClient
+    is not multi-writer safe; the lock is what keeps concurrent MCP servers,
+    miners, hooks, and cron jobs from corrupting the HNSW index. Reads are
+    never locked.
+    """
+
+    def __init__(self, collection, palace_path: Optional[str] = None):
         self._collection = collection
+        self._palace_path = palace_path
+
+    def _write_lock(self):
+        """Write lock for this collection's palace (no-op if path unknown)."""
+        if self._palace_path is None:
+            return contextlib.nullcontext()
+        return palace_write_lock(self._palace_path)
 
     # ------------------------------------------------------------------
     # Writes
@@ -193,7 +209,8 @@ class ChromaCollection(BaseCollection):
             kwargs["metadatas"] = metadatas
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
-        self._collection.add(**kwargs)
+        with self._write_lock():
+            self._collection.add(**kwargs)
 
     def upsert(self, *, documents, ids, metadatas=None, embeddings=None):
         kwargs: dict[str, Any] = {"documents": documents, "ids": ids}
@@ -201,7 +218,8 @@ class ChromaCollection(BaseCollection):
             kwargs["metadatas"] = metadatas
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
-        self._collection.upsert(**kwargs)
+        with self._write_lock():
+            self._collection.upsert(**kwargs)
 
     def update(
         self,
@@ -220,7 +238,8 @@ class ChromaCollection(BaseCollection):
             kwargs["metadatas"] = metadatas
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
-        self._collection.update(**kwargs)
+        with self._write_lock():
+            self._collection.update(**kwargs)
 
     # ------------------------------------------------------------------
     # Reads
@@ -364,7 +383,8 @@ class ChromaCollection(BaseCollection):
             kwargs["ids"] = ids
         if where is not None:
             kwargs["where"] = where
-        self._collection.delete(**kwargs)
+        with self._write_lock():
+            self._collection.delete(**kwargs)
 
     def count(self):
         return self._collection.count()
@@ -465,6 +485,11 @@ class ChromaBackend(BaseBackend):
         )
 
         if cached is None or inode_changed or mtime_changed or mtime_appeared:
+            # Corruption sentinel: quarantine HNSW segments that are far
+            # older than chroma.sqlite3 (crashed-mid-write state) BEFORE
+            # opening the client — otherwise the Rust graph-walk can
+            # segfault on the dangling index. ChromaDB rebuilds lazily.
+            quarantine_stale_hnsw(palace_path)
             _fix_blob_seq_ids(palace_path)
             cached = chromadb.PersistentClient(path=palace_path)
             self._clients[palace_path] = cached
@@ -486,6 +511,7 @@ class ChromaBackend(BaseBackend):
         own client cache. New code should obtain a collection through
         :meth:`get_collection` which manages caching internally.
         """
+        quarantine_stale_hnsw(palace_path)
         _fix_blob_seq_ids(palace_path)
         return chromadb.PersistentClient(path=palace_path)
 
@@ -528,18 +554,24 @@ class ChromaBackend(BaseBackend):
             except (OSError, NotImplementedError):
                 pass
 
-        client = self._client(palace_path)
         hnsw_space = "cosine"
         if options and isinstance(options, dict):
             hnsw_space = options.get("hnsw_space", hnsw_space)
 
         if create:
-            collection = client.get_or_create_collection(
-                collection_name, metadata={"hnsw:space": hnsw_space}
-            )
+            # DB + collection creation races on a fresh palace (six MCP
+            # servers starting at once → "table collections already exists"),
+            # so the create path takes the write lock around client init
+            # AND get_or_create_collection.
+            with palace_write_lock(palace_path):
+                client = self._client(palace_path)
+                collection = client.get_or_create_collection(
+                    collection_name, metadata={"hnsw:space": hnsw_space}
+                )
         else:
+            client = self._client(palace_path)
             collection = client.get_collection(collection_name)
-        return ChromaCollection(collection)
+        return ChromaCollection(collection, palace_path=palace_path)
 
     def close_palace(self, palace) -> None:
         """Drop cached handles for ``palace``. Accepts ``PalaceRef`` or legacy path str."""
@@ -573,16 +605,18 @@ class ChromaBackend(BaseBackend):
 
     def delete_collection(self, palace_path: str, collection_name: str) -> None:
         """Delete ``collection_name`` from the palace at ``palace_path``."""
-        self._client(palace_path).delete_collection(collection_name)
+        with palace_write_lock(palace_path):
+            self._client(palace_path).delete_collection(collection_name)
 
     def create_collection(
         self, palace_path: str, collection_name: str, hnsw_space: str = "cosine"
     ) -> ChromaCollection:
         """Create (not get-or-create) ``collection_name`` with the given HNSW space."""
-        collection = self._client(palace_path).create_collection(
-            collection_name, metadata={"hnsw:space": hnsw_space}
-        )
-        return ChromaCollection(collection)
+        with palace_write_lock(palace_path):
+            collection = self._client(palace_path).create_collection(
+                collection_name, metadata={"hnsw:space": hnsw_space}
+            )
+        return ChromaCollection(collection, palace_path=palace_path)
 
 
 def _normalize_get_collection_args(args, kwargs):
