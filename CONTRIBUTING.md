@@ -74,6 +74,81 @@ Check the [Issues](https://github.com/MemPalace/mempalace/issues) tab. Great sta
 - **Tests**: Increase coverage — especially for `knowledge_graph.py` and `palace_graph.py`
 - **Entity detection**: Better name disambiguation in `entity_detector.py`
 - **Docs**: Improve examples, add tutorials
+- **Source adapters**: New read-side adapters — see the guide below
+
+## Write a Source Adapter in 30 Minutes
+
+MemPalace reads external sources (folders, chat exports, journals) through
+**source adapters** — small extraction-only classes that turn source items
+into typed records. The adapter never writes to the palace: core drains the
+record stream and handles routing, locking, and incremental state. That
+boundary keeps adapters testable without ChromaDB and reviewable in one sitting.
+
+The smallest real example ships in-tree:
+[`mempalace/sources/diary.py`](mempalace/sources/diary.py) (~230 lines with
+docstrings). Copy it as your starting point.
+
+### The contract in five moves
+
+1. **Subclass `BaseSourceAdapter`** (`mempalace/sources/base.py`) and set the
+   class attributes: `name`, `adapter_version`, `supported_modes`
+   (`chunked_content`, `whole_record`, or `metadata_only`), `capabilities`,
+   `declared_transformations` (usually empty — verbatim is the promise), and
+   `default_privacy_class`.
+2. **Implement `ingest(*, source, palace)`** as a generator. For every item:
+   - First `yield SourceItemMetadata(...)` — stat-level info only
+     (`source_file`, `version` string, `size_hint`, `route_hint`). Core calls
+     `is_current` from this, *before* you've read anything, so unchanged
+     sources cost zero I/O.
+   - Then check `palace._skip_requested`; if core says skip, `continue`.
+   - Only now read the item and `yield DrawerRecord(...)` with the **exact
+     content** and **flat scalar metadata** (strings/ints only — the storage
+     layer rejects nested values; join lists with a delimiter like `";"`).
+3. **Implement `is_current(*, item, existing_metadata)`**: compare the item's
+   `version` against the state core hands back. Cheap and side-effect free.
+4. **Implement `describe_schema()`**: declare every metadata field you stamp
+   (type, required, indexed, description). This is what makes your drawer
+   metadata discoverable and what schema-conformance checks run against.
+5. **Register it.** In-tree adapters register in `mempalace/sources/__init__.py`.
+   Third-party packages declare an entry point instead:
+
+   ```toml
+   # pyproject.toml of mempalace-source-cursor
+   [project.entry-points."mempalace.sources"]
+   cursor = "mempalace_source_cursor:CursorAdapter"
+   ```
+
+### The rules that matter
+
+- **Never write to the palace.** Route everything through yielded records.
+  The `PalaceContext` you receive is read-side plus `skip_current_item()`.
+- **Never transform content.** If you must (e.g. HTML → text), declare it in
+  `declared_transformations` — undeclared transformations are a contract
+  violation and reviewers will bounce the PR.
+- **Metadata must stay flat scalars.** No lists, no dicts.
+- **Yield metadata before reading.** Incremental skipping only works if the
+  stat-level info comes first.
+- **Raise `SourceNotFoundError` / `AuthRequiredError` loudly** — silent
+  empty results hide broken setups.
+
+### Verify your work
+
+```bash
+# 1. Extraction only — no palace needed
+pytest tests/test_sources_diary.py -q   # the reference adapter's tests
+
+# 2. Dry status diff against a real source dir (no writes, no file reads)
+mempalace sources list
+mempalace sources status diary --dir ~/daily_summaries
+
+# 3. Full suite (the runner side lives in diary_ingest.py / core)
+pytest tests/ -v
+```
+
+Write tests next to the reference ones (`tests/test_sources_diary.py` shows
+the patterns: stream shape, skip-without-read, `is_current` edge cases, and
+the unreadable-file oracle for status). PRs without tests for the adapter
+contract will be asked to add them before merge.
 
 ## Architecture Decisions
 

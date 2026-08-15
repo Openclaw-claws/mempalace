@@ -512,6 +512,53 @@ def cmd_compress(args):
         print("  (dry run -- nothing stored)")
 
 
+def cmd_sources(args):
+    """`mempalace sources list|status` — source adapter inventory + dry diff."""
+    action = getattr(args, "sources_action", None)
+
+    if action == "list":
+        from .sources import available_adapters, get_adapter_class
+
+        names = available_adapters()
+        if not names:
+            print("No source adapters registered.")
+            return
+        print(f"{'ADAPTER':<16} {'VERSION':<10} {'MODES':<24} INCREMENTAL")
+        for name in names:
+            cls = get_adapter_class(name)
+            modes = ",".join(sorted(cls.supported_modes)) or "-"
+            incremental = "yes" if "supports_incremental" in cls.capabilities else "no"
+            print(f"{name:<16} {cls.adapter_version:<10} {modes:<24} {incremental}")
+        return
+
+    if action == "status":
+        from .sources.base import SourceRef
+        from .sources.status import adapter_status
+
+        palace_path = (
+            os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+        )
+        source = SourceRef(local_path=os.path.expanduser(args.dir), options={"wing": args.wing})
+        try:
+            result = adapter_status(
+                adapter_name=args.adapter, source=source, palace_path=palace_path
+            )
+        except KeyError as e:
+            print(f"Unknown adapter: {e}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error checking source: {e}")
+            sys.exit(1)
+        print(f"Source: {source.local_path}")
+        print(f"Adapter: {result['adapter']}  ({result['items']} items)")
+        print(f"  current: {result['current']}  (up to date, nothing to do)")
+        print(f"  stale:   {result['stale']}  (changed since last ingest)")
+        print(f"  new:     {result['new']}  (never ingested)")
+        if result["stale"] or result["new"]:
+            print("Run ingest to bring the palace up to date.")
+        return
+
+
 def main():
     version_label = f"MemPalace {__version__}"
     parser = argparse.ArgumentParser(
@@ -704,6 +751,23 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    # sources
+    p_sources = sub.add_parser(
+        "sources",
+        help="Source adapters (RFC 002): list adapters, dry-check ingest status",
+    )
+    sources_sub = p_sources.add_subparsers(dest="sources_action")
+    sources_sub.add_parser("list", help="List available source adapters")
+    p_sources_status = sources_sub.add_parser(
+        "status",
+        help="Dry diff: what would a new ingest do? (no writes, no file reads)",
+    )
+    p_sources_status.add_argument("adapter", help="Adapter name (see 'sources list')")
+    p_sources_status.add_argument("--dir", required=True, help="Source directory")
+    p_sources_status.add_argument(
+        "--wing", default="diary", help="Wing option passed to the adapter"
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -711,6 +775,13 @@ def main():
         return
 
     # Handle two-level subcommands
+    if args.command == "sources":
+        if not getattr(args, "sources_action", None):
+            p_sources.print_help()
+            return
+        cmd_sources(args)
+        return
+
     if args.command == "hook":
         if not getattr(args, "hook_action", None):
             p_hook.print_help()

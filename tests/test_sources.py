@@ -59,10 +59,20 @@ class _TrivialAdapter(BaseSourceAdapter):
 
 @pytest.fixture(autouse=True)
 def _isolate_registry():
+    # Snapshot/restore: tests that register (e.g. "_trivial") are cleaned
+    # up, while first-party adapters registered at import time (diary)
+    # survive for the rest of the process — unregistering those would leak
+    # import-order-dependent failures into other test modules.
+    from mempalace.sources import registry
+
+    saved_registry = dict(registry._registry)
+    saved_explicit = set(registry._explicit)
     yield
     reset_adapters()
-    for name in list(available_adapters()):
-        unregister(name)
+    registry._registry.clear()
+    registry._registry.update(saved_registry)
+    registry._explicit.clear()
+    registry._explicit.update(saved_explicit)
 
 
 # ---------------------------------------------------------------------------

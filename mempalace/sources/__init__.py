@@ -35,6 +35,7 @@ from .base import (
     TransformationViolationError,
 )
 from .context import PalaceContext, ProgressHook
+from .diary import DiarySourceAdapter
 from .registry import (
     available_adapters,
     get_adapter,
@@ -45,11 +46,16 @@ from .registry import (
     unregister,
 )
 
+# First-party adapters ship pre-registered (RFC 002 §3.2): explicit
+# registration wins over entry-point discovery on any name conflict.
+register("diary", DiarySourceAdapter)
+
 __all__ = [
     "AdapterClosedError",
     "AdapterSchema",
     "AuthRequiredError",
     "BaseSourceAdapter",
+    "DiarySourceAdapter",
     "DrawerRecord",
     "FieldSpec",
     "IngestMode",

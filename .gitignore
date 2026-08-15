@@ -36,3 +36,6 @@ venv/
 
 # ChromaDB local data
 *.sqlite3-journal
+
+# Stray default palace in repo root (never commit memory data)
+/palace/
