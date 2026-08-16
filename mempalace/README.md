@@ -6,7 +6,7 @@ The Python package that powers MemPalace. All modules, all logic.
 
 | Module | What it does |
 |--------|-------------|
-| `cli.py` | CLI entry point — routes to mine, search, init, compress, wake-up |
+| `cli.py` | CLI entry point — routes to mine, search, init, compress, wake-up, sources |
 | `config.py` | Configuration loading — `~/.mempalace/config.json`, env vars, defaults |
 | `normalize.py` | Converts 5 chat formats (Claude Code JSONL, Claude.ai JSON, ChatGPT JSON, Slack JSON, plain text) to standard transcript format |
 | `miner.py` | Project file ingest — scans directories, chunks by paragraph, stores to ChromaDB |
@@ -24,6 +24,7 @@ The Python package that powers MemPalace. All modules, all logic.
 | `room_detector_local.py` | Maps folders to room names using 70+ patterns — no API |
 | `spellcheck.py` | Name-aware spellcheck — won't "correct" proper nouns in your entity registry |
 | `split_mega_files.py` | Splits concatenated transcript files into per-session files |
+| `sources/` | Source adapter subsystem (RFC 002) — extraction-only adapters (`diary.py` is the reference), registry, dry `sources status` diff |
 
 ## Architecture
 

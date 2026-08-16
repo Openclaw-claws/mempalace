@@ -18,8 +18,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Offline fact checker against the entity registry and knowledge graph (#829)
 - LLM-based closet regeneration — optional, bring-your-own endpoint, no mandatory API key (#793)
 - Hall detection — routes drawer content to `emotions` / `technical` / `family` / `memory` / `identity` / `consciousness` / `creative` halls, enabling hall-based graph connectivity within wings (#835)
+- First-party source adapters (RFC 002) — `diary_ingest` extraction moved onto `BaseSourceAdapter` in `sources/diary.py` as the reference adapter; the core runner drains its record stream and stamps adapter provenance on every drawer
+- `mempalace sources list|status` — adapter inventory plus a dry diff (current/stale/new) against ingest state that never reads item bodies or writes to the palace
 
 ### Bug Fixes
+- Cross-process write lock for all ChromaDB mutations — prevents HNSW index corruption when multiple MCP servers, miners, hooks, and cron jobs write to one palace; contention fails loudly via `WriteLockTimeoutError` (overridable with `MEMPALACE_WRITE_LOCK_TIMEOUT`)
+- Quarantine stale HNSW segments at client init — ChromaDB rebuilds the index lazily instead of segfaulting on dangling graph entries after a crashed mid-write
+- Serialize collection creation across processes — fixes the "table collections already exists" race when several processes open a fresh palace at once
 - Set `hnsw:space=cosine` metadata on all collection creation sites — fixes broken similarity scoring under ChromaDB's default L2 distance (#807, #218)
 - File-level locking prevents duplicate drawers when agents mine the same file concurrently (#784, #826)
 - Hybrid closet+drawer retrieval — closets boost ranking, never gate results (#795)
@@ -39,6 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Documentation
 - Add `docs/CLOSETS.md` — closet layer overview
+- Add "Write a Source Adapter in 30 Minutes" guide to `CONTRIBUTING.md`, anchored on the in-tree `sources/diary.py` reference adapter
 - Fix stale `milla-jovovich/*` org URLs in website and plugin manifests (#787)
 - Fix remaining stale org URLs in contributor docs (#808)
 - Rewrite `README.md` and `mempalaceofficial.com` benchmark pages to remove category-error cross-system comparisons (R@5 retrieval recall had been listed next to competitor QA accuracy under one column), remove the retracted "+34% palace boost" claim from the surfaces where it had remained, replace the `100%` Haiku-rerank headline with the honest held-out `98.4%` R@5, drop the LoCoMo `100%` top-50 row (retrieval-bypass artefact), and fix the broken `aya-thekeeper/mempal` reproduction URL (#875)
