@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -150,6 +151,43 @@ def _output(data: dict):
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _mine_max_age_days() -> int:
+    """Maximum transcript age (days) eligible for background mining.
+
+    0 or negative disables the guard (pre-2026-08-29 behaviour).
+    """
+    try:
+        return int(os.environ.get("MEMPAL_MINE_MAX_AGE_DAYS", "3"))
+    except ValueError:
+        return 3
+
+
+def _transcript_is_stale(path: Path) -> bool:
+    """True when a transcript is too old to background-mine.
+
+    Catches the 2026-08-29 incident class: a hook fired by a resumed old
+    session mined its whole date-coded folder (~/.codex/sessions/YYYY/MM/DD)
+    for hours at high CPU. The dir-date check fires even when a resume
+    touched the file's mtime.
+    """
+    max_age = _mine_max_age_days()
+    if max_age <= 0:
+        return False
+    cutoff = time.time() - max_age * 86400
+    match = re.search(r"sessions/(\d{4})/(\d{2})/(\d{2})", str(path))
+    if match:
+        try:
+            dir_ts = datetime(int(match[1]), int(match[2]), int(match[3])).timestamp()
+        except ValueError:
+            dir_ts = None
+        if dir_ts is not None and dir_ts < cutoff:
+            return True
+    try:
+        return path.stat().st_mtime < cutoff
+    except OSError:
+        return False
+
+
 def _get_mine_dir(transcript_path: str = "") -> str:
     """Determine directory to mine from MEMPAL_DIR or transcript path."""
     mempal_dir = os.environ.get("MEMPAL_DIR", "")
@@ -158,6 +196,9 @@ def _get_mine_dir(transcript_path: str = "") -> str:
     if transcript_path:
         path = Path(transcript_path).expanduser()
         if path.is_file():
+            if _transcript_is_stale(path):
+                _log("Skipping stale transcript (age guard)")
+                return ""
             return str(path.parent)
     return ""
 
