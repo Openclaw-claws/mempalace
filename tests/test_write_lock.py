@@ -149,10 +149,13 @@ def test_env_var_overrides_default_timeout(tmp_path, monkeypatch):
         holder.wait(timeout=10)
 
 
-def test_client_init_quarantines_stale_hnsw_segment(tmp_path):
-    """The corruption sentinel: opening a client on a drifted palace must
-    rename the stale HNSW segment out of the way before chroma touches it."""
+def test_client_init_quarantines_stale_hnsw_segment(tmp_path, monkeypatch):
+    """The corruption sentinel (opt-in): with MEMPALACE_AUTO_QUARANTINE_HNSW=1,
+    opening a client on a drifted palace renames the stale HNSW segment out of
+    the way before chroma touches it."""
     import chromadb
+
+    monkeypatch.setenv("MEMPALACE_AUTO_QUARANTINE_HNSW", "1")
 
     palace = tmp_path / "palace"
     palace.mkdir()

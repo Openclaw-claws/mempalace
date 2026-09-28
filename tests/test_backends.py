@@ -420,6 +420,26 @@ def test_quarantine_stale_hnsw_leaves_fresh_segment_alone(tmp_path):
     assert seg.exists()
 
 
+def test_auto_quarantine_is_opt_in(tmp_path, monkeypatch):
+    """Opening a palace must not discard an HNSW index unless explicitly enabled.
+
+    The mtime heuristic fired 218 times on one live palace (2026-08-15..09-28),
+    throwing away a 432k-vector index each time because HNSW flushes lag sqlite
+    writes by hours in normal operation.
+    """
+    from mempalace.backends.chroma import _auto_quarantine
+
+    now = 1_700_000_000.0
+    palace, seg = _make_palace_with_segment(tmp_path, hnsw_mtime=now - 7200, sqlite_mtime=now)
+    monkeypatch.delenv("MEMPALACE_AUTO_QUARANTINE_HNSW", raising=False)
+    assert _auto_quarantine(str(palace)) == []
+    assert seg.exists()
+
+    monkeypatch.setenv("MEMPALACE_AUTO_QUARANTINE_HNSW", "1")
+    assert len(_auto_quarantine(str(palace))) == 1
+    assert not seg.exists()
+
+
 def test_quarantine_stale_hnsw_no_palace(tmp_path):
     """Missing palace path or chroma.sqlite3: return [] without raising."""
     assert quarantine_stale_hnsw(str(tmp_path / "missing")) == []

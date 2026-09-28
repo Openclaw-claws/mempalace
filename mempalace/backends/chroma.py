@@ -132,6 +132,20 @@ def quarantine_stale_hnsw(palace_path: str, stale_seconds: float = 3600.0) -> li
     return moved
 
 
+def _auto_quarantine(palace_path: str) -> list[str]:
+    """Run :func:`quarantine_stale_hnsw` on open only when explicitly enabled.
+
+    The mtime gap is not a reliable corruption signal: ChromaDB flushes HNSW
+    in batches while sqlite is touched on every write, so a healthy index is
+    routinely more than an hour "behind". Quarantining on open discarded a
+    live 432k-vector index 218 times in six weeks. Opt in with
+    ``MEMPALACE_AUTO_QUARANTINE_HNSW=1`` when chasing a known segfault.
+    """
+    if os.environ.get("MEMPALACE_AUTO_QUARANTINE_HNSW") != "1":
+        return []
+    return quarantine_stale_hnsw(palace_path)
+
+
 def _fix_blob_seq_ids(palace_path: str) -> None:
     """Fix ChromaDB 0.6.x -> 1.5.x migration bug: BLOB seq_ids -> INTEGER.
 
@@ -490,7 +504,7 @@ class ChromaBackend(BaseBackend):
             # opening the client — otherwise the Rust graph-walk can
             # segfault on the dangling index. ChromaDB rebuilds lazily.
             def open_client():
-                quarantine_stale_hnsw(palace_path)
+                _auto_quarantine(palace_path)
                 _fix_blob_seq_ids(palace_path)
                 return chromadb.PersistentClient(path=palace_path)
 
@@ -523,7 +537,7 @@ class ChromaBackend(BaseBackend):
         :meth:`get_collection` which manages caching internally.
         """
         with palace_write_lock(palace_path):
-            quarantine_stale_hnsw(palace_path)
+            _auto_quarantine(palace_path)
             _fix_blob_seq_ids(palace_path)
             return chromadb.PersistentClient(path=palace_path)
 
