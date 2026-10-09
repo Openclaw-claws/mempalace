@@ -30,9 +30,78 @@ Usage (from CLI):
 import argparse
 import os
 import shutil
+import sqlite3
 import time
 
 from .backends.chroma import ChromaBackend
+
+
+def _extract_drawers_from_sqlite(palace_path, collection_name=None):
+    """Extract (ids, docs, metadatas) reading chroma.sqlite3 directly.
+
+    Immune to the hard SIGSEGV a corrupt HNSW segment causes inside the
+    Rust bindings — col.get()/col.count() kill the whole process (exit 139,
+    uncatchable by try/except), so repair must never depend on them while
+    the corrupt segment exists. Documents live in embedding_metadata under
+    the ``chroma:document`` key.
+    """
+    collection_name = collection_name or COLLECTION_NAME
+    if not os.path.exists(os.path.join(palace_path, "chroma.sqlite3")):
+        return [], [], []
+    con = sqlite3.connect(os.path.join(palace_path, "chroma.sqlite3"))
+    con.row_factory = sqlite3.Row
+    try:
+        have = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='collections'"
+        ).fetchone()
+        if not have:
+            return [], [], []
+        cid = con.execute(
+            "SELECT id FROM collections WHERE name=?", (collection_name,)
+        ).fetchone()
+        if not cid:
+            return [], [], []
+        segs = [
+            r["id"]
+            for r in con.execute("SELECT id FROM segments WHERE collection=?", (cid["id"],))
+        ]
+        if not segs:
+            return [], [], []
+        marks = ",".join("?" * len(segs))
+        rows = con.execute(
+            """SELECT e.id AS eid, e.embedding_id, em.key, em.string_value,
+                      em.int_value, em.float_value, em.bool_value
+               FROM embeddings e LEFT JOIN embedding_metadata em ON em.id = e.id
+               WHERE e.segment_id IN (%s) ORDER BY e.id""" % marks,
+            segs,
+        )
+        ids, docs, metas = [], [], []
+        cur = None
+        for r in rows:
+            if r["eid"] != cur:
+                cur = r["eid"]
+                ids.append(r["embedding_id"])
+                docs.append("")
+                metas.append({})
+            if r["key"] is None:
+                continue
+            if r["key"] == "chroma:document":
+                docs[-1] = r["string_value"] or ""
+            else:
+                v = r["string_value"]
+                if v is None and r["int_value"] is not None:
+                    v = r["int_value"]
+                elif v is None and r["float_value"] is not None:
+                    v = r["float_value"]
+                elif v is None and r["bool_value"] is not None:
+                    v = bool(r["bool_value"])
+                metas[-1][r["key"]] = v
+        return ids, docs, metas
+    except sqlite3.DatabaseError:
+        # palace/fixture inválido o no-sqlite — tratado como vacío
+        return [], [], []
+    finally:
+        con.close()
 
 
 COLLECTION_NAME = "mempalace_drawers"
@@ -204,7 +273,9 @@ def prune_corrupt(palace_path=None, confirm=False):
 def rebuild_index(palace_path=None):
     """Rebuild the HNSW index from scratch.
 
-    1. Extract all drawers via ChromaDB get()
+    1. Extract all drawers from raw sqlite (immune to the SIGSEGV a corrupt
+       HNSW segment causes inside the Rust bindings — col.get()/col.count()
+       kill the whole process with exit 139, uncatchable by try/except)
     2. Back up ONLY chroma.sqlite3 (not the bloated HNSW files)
     3. Delete and recreate the collection with hnsw:space=cosine
     4. Upsert all drawers back
@@ -221,36 +292,16 @@ def rebuild_index(palace_path=None):
     print(f"  Palace: {palace_path}")
 
     backend = ChromaBackend()
-    try:
-        col = backend.get_collection(palace_path, COLLECTION_NAME)
-        total = col.count()
-    except Exception as e:
-        print(f"  Error reading palace: {e}")
-        print("  Palace may need to be re-mined from source files.")
-        return
 
-    print(f"  Drawers found: {total}")
+    print("  Extracting drawers from sqlite (segfault-safe)...")
+    t0 = time.time()
+    all_ids, all_docs, all_metas = _extract_drawers_from_sqlite(palace_path)
+    total = len(all_ids)
+    print(f"  Drawers found: {total} (in {time.time() - t0:.1f}s)")
 
     if total == 0:
         print("  Nothing to repair.")
         return
-
-    # Extract all drawers in batches
-    print("\n  Extracting drawers...")
-    batch_size = 5000
-    all_ids = []
-    all_docs = []
-    all_metas = []
-    offset = 0
-    while offset < total:
-        batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
-        if not batch["ids"]:
-            break
-        all_ids.extend(batch["ids"])
-        all_docs.extend(batch["documents"])
-        all_metas.extend(batch["metadatas"])
-        offset += len(batch["ids"])
-    print(f"  Extracted {len(all_ids)} drawers")
 
     # Back up ONLY the SQLite database, not the bloated HNSW files
     sqlite_path = os.path.join(palace_path, "chroma.sqlite3")
@@ -261,6 +312,7 @@ def rebuild_index(palace_path=None):
         print(f"  Backup: {backup_path}")
 
     # Rebuild with correct HNSW settings
+    batch_size = 5000
     print("  Rebuilding collection with hnsw:space=cosine...")
     backend.delete_collection(palace_path, COLLECTION_NAME)
     new_col = backend.create_collection(palace_path, COLLECTION_NAME)

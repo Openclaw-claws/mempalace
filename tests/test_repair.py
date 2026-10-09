@@ -214,20 +214,36 @@ def test_rebuild_index_empty_palace(mock_backend_cls, mock_shutil, tmp_path):
 @patch("mempalace.repair.shutil")
 @patch("mempalace.repair.ChromaBackend")
 def test_rebuild_index_success(mock_backend_cls, mock_shutil, tmp_path):
-    # Create a fake sqlite file
-    sqlite_path = tmp_path / "chroma.sqlite3"
-    sqlite_path.write_text("fake")
+    # Real mini chroma sqlite — extraction now reads raw sqlite so a corrupt
+    # HNSW segment can't SIGSEGV the repair process.
+    import sqlite3
 
-    mock_col = MagicMock()
-    mock_col.count.return_value = 2
-    mock_col.get.return_value = {
-        "ids": ["id1", "id2"],
-        "documents": ["doc1", "doc2"],
-        "metadatas": [{"wing": "a"}, {"wing": "b"}],
-    }
+    sqlite_path = tmp_path / "chroma.sqlite3"
+    con = sqlite3.connect(sqlite_path)
+    con.executescript(
+        """
+        CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT);
+        CREATE TABLE segments (id TEXT PRIMARY KEY, type TEXT, scope TEXT,
+                               collection TEXT);
+        CREATE TABLE embeddings (id INTEGER PRIMARY KEY, segment_id TEXT,
+                                 embedding_id TEXT, seq_id BLOB);
+        CREATE TABLE embedding_metadata (id INTEGER, key TEXT, string_value TEXT,
+                                         int_value INTEGER, float_value REAL,
+                                         bool_value INTEGER);
+        INSERT INTO collections VALUES ('c1', 'mempalace_drawers');
+        INSERT INTO segments VALUES ('s1', 'vec', 'c1', 'c1');
+        INSERT INTO embeddings VALUES (1, 's1', 'id1', x'01'), (2, 's1', 'id2', x'02');
+        INSERT INTO embedding_metadata VALUES (1, 'chroma:document', 'doc1', NULL, NULL, NULL);
+        INSERT INTO embedding_metadata VALUES (1, 'wing', 'a', NULL, NULL, NULL);
+        INSERT INTO embedding_metadata VALUES (2, 'chroma:document', 'doc2', NULL, NULL, NULL);
+        INSERT INTO embedding_metadata VALUES (2, 'wing', 'b', NULL, NULL, NULL);
+        """
+    )
+    con.commit()
+    con.close()
 
     mock_new_col = MagicMock()
-    mock_backend = _install_mock_backend(mock_backend_cls, mock_col)
+    mock_backend = _install_mock_backend(mock_backend_cls, MagicMock())
     mock_backend.create_collection.return_value = mock_new_col
 
     repair.rebuild_index(palace_path=str(tmp_path))
